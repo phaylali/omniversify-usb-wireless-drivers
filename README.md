@@ -183,6 +183,13 @@ Full detail lives in [`DEV_NOTES.md`](DEV_NOTES.md). In brief:
   open, scan tuning fell back to defaults, and **scans found zero networks**.
   This was the actual root cause of "driver loads but nothing is visible".
   Now `/usr/lib/zt9101/wifi.cfg` with a fallback in `hif_init()`.
+- **A kernel `WARNING` on every interface open.** The driver wrote the MAC
+  straight into `net_device->dev_addr`. Since 5.15 that field is a pointer into
+  the `dev_addrs` rb-tree, and the kernel keeps a parallel `dev_addr_shadow`
+  that it memcmp's against on every `dev_open()` — so NetworkManager applying a
+  randomised MAC desynced the two and produced `netdev_WARN(…, "Incorrect
+  netdev->dev_addr")` plus a stale tree key, on every clean load. Both write
+  sites now use `dev_addr_set()`.
 - **Compiler auto-detection**, so plain `make` works on clang *and* gcc kernels.
 
 ---

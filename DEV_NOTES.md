@@ -130,6 +130,41 @@ Installed system-wide:
 /usr/lib/zt9101/fw/*.bin
 ```
 
+### 7. `Incorrect netdev->dev_addr` warning on every open
+
+`netdev_WARN(dev, "Incorrect netdev->dev_addr")` fired in `dev_addr_check()`
+(`net/core/dev_addr_lists.c`) from `__dev_open`, i.e. the moment NetworkManager
+brought `wlan0` up — on **every** clean module load, not just during reconnect
+races. It taints the kernel with `W`.
+
+Since v5.15 `dev->dev_addr` is a pointer *into* the `dev_addrs` rb-tree entry,
+and the kernel keeps a parallel `dev->dev_addr_shadow[MAX_ADDR_LEN]` that
+`dev_addr_check()` memcmp's against over all 32 bytes. The sanctioned writer,
+`dev_addr_mod()` → `dev_addr_set()`, updates the entry **and** the shadow and
+re-inserts the tree node; a bare `memcpy` into `->dev_addr` updates neither.
+
+Two sites in `os/linux/netdev/ndev_linux.c` were doing bare writes:
+
+| Site | Function | Was | Now |
+|---|---|---|---|
+| 94 | `ndev_init` | `memcpy(dev_addr)` + `memcpy(dev_addr_shadow)` under `>= 5.17` | `dev_addr_set(ndev, …)` |
+| 588 | `ndev_set_mac_addr` | `memcpy(dev_addr)` **only** | `dev_addr_set(pnetdev, …)` |
+
+Site 588 was the actual trigger — NetworkManager applies a randomised
+(locally-administered `52:…`) MAC via `ndo_set_mac_address`, which desynced the
+shadow from the efuse address already written at init:
+
+```
+[D][ndev_set_mac_addr:568] ndev_set_mac_addr:52:3e:2c:fc:02:5e
+wlan0: Current addr:  52 3e 2c fc 02 5e 00 …   ← dev_addr          (site 588)
+wlan0: Expected addr: 90 91 64 02 49 1d 00 …   ← dev_addr_shadow   (site 94, stale)
+```
+
+`dev_addr_set()` exists in every kernel from 6.12 through 7.2 (checked against
+the real `include/linux/netdevice.h` at each tag), so it needs no version
+guard. The direct writes also silently corrupted the rb-tree key, since the
+node's bytes changed without a `rb_erase`/re-insert.
+
 ## DKMS install (persistence)
 
 `dkms.conf` lives at the source root:
@@ -149,15 +184,46 @@ from `vmlinux`'s `.comment`). Supplying `make -C $kernel_source_dir M=…` — t
 DKMS default — would break, because our top-level Makefile is a wrapper, not a
 kbuild object Makefile.
 
-Registered for all three installed kernels; `dkms status`:
+Registered by the AUR package for every installed kernel that has both headers
+**and** a module tree; `dkms status`:
 
 ```
 zt9101/1.2.1800.20241115, 6.18.52-1-cachyos-lts, x86_64: installed
 zt9101/1.2.1800.20241115, 7.2.8-1-cachyos,      x86_64: installed
-zt9101/1.2.1800.20241115, 7.2.8-arch1-2,        x86_64: installed
 ```
 
-Autoload via `/etc/modules-load.d/zt9101.conf`.
+`7.2.8-arch1-2` is skipped on this machine, correctly: `linux-headers` for it is
+installed but the `linux` package itself is not, so `/lib/modules/7.2.8-arch1-2/`
+contains only `build/` and `vdso/` — there is no `kernel/` tree to install a
+module into and nothing bootable. Arch's alpm DKMS hook refuses such trees
+(`Missing <kver> kernel modules tree`); the earlier manual `dkms install -k` run
+had force-created `updates/dkms/` there, which is why it used to appear.
+
+### Autoload — udev modalias, no init-specific config
+
+**No `.conf` file is installed for any init system.** The USB ID is in the
+module as a modalias:
+
+```
+usb:v350Bp9101d0000dc00dsc00dp00icFFiscFFipFFin00
+```
+
+`depmod` records it in `modules.alias`; the *interface* node (e.g. `1-5:1.0`,
+**not** the device node `1-5`, which carries no modalias) publishes it in its
+uevent, and udev's `80-drivers.rules` fires:
+
+```
+ENV{MODALIAS}=="?*", RUN{builtin}+="kmod load"
+```
+
+Verified by `rmmod` + `udevadm trigger --sysname-match='1-5:1.0'` → module
+autoloaded, `phy`/`wlan0` recreated, NM reconnected.
+
+This is deliberate and is what makes the package portable: `/etc/modules-load.d`
+is **systemd-only**, whereas OpenRC expects `/etc/openrc/conf.d/modules` (s6,
+runit and dinit each differ again). Hardcoding `modules-load.d` makes a package
+install cleanly on Artix and then never load. `80-drivers.rules` ships with both
+**systemd-udev and eudev** (Artix), and udev runs under every one of those inits.
 
 Notes:
 - DKMS signs each module with `/var/lib/dkms/mok.key` ("DKMS module signing
@@ -186,15 +252,23 @@ minute. The shipped source and all three installed modules contain **zero**
   `FW1 Ver: 2.8.6.2`, `bulk download firmware ok`, `zt_power_on success`.
 - Persistent across reboot via DKMS + `modules-load.d`; NM profile has
   `autoconnect: yes`.
-- Steady-state kernel log is quiet: 8 lines after real traffic, 0 `WARNING`,
-  0 `ZTPROBE`, 0 verification failures.
+- Steady-state kernel log is quiet: 0 `WARNING`, 0 `ZTPROBE`, 0 verification
+  failures, 0 oops/BUG (the `RIP: 0010` lines inside a WARN are just stack
+  frames — a real oops also prints `Kernel panic` / `BUG: unable to handle` /
+  `Oops:`).
 - Module is signed; `rmmod`/`modprobe` cycles cleanly (the proc fix holds).
+- Full fresh-install path proven end-to-end: `pacman -U` → alpm hook → DKMS
+  build → `modules.alias` → `udevadm trigger` autoloads → NM autoconnects.
 
 ### Known non-fatal warnings
 
-Five `WARNING:` traces fire once during an association, all inside `zt_msg_new`
-failure paths (`mlme.c:1744`, `auth.c:881`, `assoc.c:1024`,
-`zt_cfg80211.c:948`, `mlme.c:1570`), and all within the same 2-second window.
-Observed only during a forced `rmmod`/`modprobe` reconnect race; **0 warnings**
-across subsequent steady-state operation, and the association succeeds anyway.
-Treat as noise unless they start appearing during normal boot association.
+Six `WARNING:` traces fire once during an association:
+
+- `dev_addr_lists.c:650` — **fixed**, see §7. Gone after switching both
+  `dev_addr` writes to `dev_addr_set()`.
+- Five inside `zt_msg_new` failure paths (`mlme.c:1744`, `auth.c:881`,
+  `assoc.c:1024`, `zt_cfg80211.c:948`, `mlme.c:1570`), all within the same
+  2-second window. Observed only during a forced `rmmod`/`modprobe` reconnect
+  race; **0 warnings** across subsequent steady-state operation, and the
+  association succeeds anyway. Treat as noise unless they start appearing
+  during normal boot association.

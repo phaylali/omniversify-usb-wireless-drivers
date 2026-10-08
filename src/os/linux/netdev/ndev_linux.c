@@ -91,10 +91,13 @@ static zt_s32 ndev_init(struct net_device *ndev)
         }
 
         NDEV_INFO("efuse_macaddr:"ZT_MAC_FMT, ZT_MAC_ARG(hw_info->macAddr));
-        zt_memcpy(ndev->dev_addr, hw_info->macAddr, ZT_80211_MAC_ADDR_LEN);
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0))
-        zt_memcpy(ndev->dev_addr_shadow, hw_info->macAddr, ZT_80211_MAC_ADDR_LEN);
-#endif
+        /* Do NOT poke ndev->dev_addr directly: since 5.15 dev->dev_addr is a
+         * pointer into the dev_addrs rb-tree entry, and the kernel keeps a
+         * separate dev_addr_shadow copy that dev_addr_check() compares
+         * against on every open. Writing dev_addr alone leaves the shadow
+         * stale and corrupts the tree key. dev_addr_set() updates both and
+         * re-inserts the node. */
+        dev_addr_set(ndev, hw_info->macAddr);
         NDEV_INFO("[%d] macaddr:"ZT_MAC_FMT, ndev_priv->nic->ndev_id,
                   ZT_MAC_ARG(hw_info->macAddr));
     }
@@ -584,8 +587,13 @@ static zt_s32 ndev_set_mac_addr(struct net_device *pnetdev, void *addr)
         return -ENOSYS;
     }
 
-    /* update mac address */
-    zt_memcpy(pnetdev->dev_addr, sock_addr->sa_data, ZT_80211_MAC_ADDR_LEN);
+    /* update mac address
+     * dev_addr_set() rather than memcpy into ->dev_addr: NetworkManager
+     * applies a randomised MAC here, and a bare write desynchronises
+     * dev_addr from dev_addr_shadow, which makes dev_addr_check() WARN
+     * with "Incorrect netdev->dev_addr" the next time the interface is
+     * brought up. */
+    dev_addr_set(pnetdev, sock_addr->sa_data);
 
     zt_memcpy(nic_to_local_addr(pnic_info), sock_addr->sa_data,
               ZT_80211_MAC_ADDR_LEN);
