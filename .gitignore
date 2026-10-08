@@ -1,4 +1,4 @@
-# build artifacts
+# build artifacts (root src/ is the driver source, packaging/src/ is makepkg's)
 *.o
 *.ko
 *.mod
@@ -10,9 +10,10 @@ modules.order
 *.o.d
 
 # makepkg output
+/packaging/src/
+/packaging/pkg/
 *.pkg.tar*
-src/pkg/
-pkg/
+*.pkg.tar.zst.sig
 
 # editor noise
 *.swp
