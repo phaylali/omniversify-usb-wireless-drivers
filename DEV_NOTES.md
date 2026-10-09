@@ -272,3 +272,49 @@ Six `WARNING:` traces fire once during an association:
   race; **0 warnings** across subsequent steady-state operation, and the
   association succeeds anyway. Treat as noise unless they start appearing
   during normal boot association.
+
+### Fresh-install field report: two daemons, one device
+
+Reported from a fresh Artix install: nothing appeared after the first install
+(kernel headers were missing, so the DKMS build was skipped — expected and
+already documented). After installing headers and rebooting, the device
+enumerated but wifi never came up, and the kernel printed:
+
+```
+info: task networkmanager:407 is blocked on a mutex likely owned by task iwd:408
+```
+
+**Diagnosis — not a driver bug.** Artix enables `iwd` by default in several of
+its images. With NetworkManager installed as well, both daemons drive the same
+device: NM spawns `wpa_supplicant` (its default backend) while iwd independently
+takes the adapter. Every register access here is a vendor USB control message
+(`usb_ctrl_read`/`usb_ctrl_write` in `os/linux/hif/usb.c`), so two managers
+issuing interleaved vendor commands is the worst possible input for this
+firmware, and it wedges. The kernel's mutex report is the symptom, not the
+cause.
+
+Fix is configuration, and it is the same on every init:
+
+- keep one daemon — `systemctl disable --now iwd` for the NetworkManager case,
+  or the `rc-update del` / `s6-rc -d change` / `dinitctl stop` equivalent on
+  Artix; or
+- declare the combined setup explicitly with `wifi.backend=iwd` in
+  `/etc/NetworkManager/NetworkManager.conf`, under which NM talks to iwd over
+  D-Bus instead of spawning wpa_supplicant.
+
+After the register path has wedged, the firmware does not recover by itself — a
+replug or reboot is required either way.
+
+**Considered and deliberately not done:** adding a delay between the
+`usb_control_msg` retries. The retry loop is 3 attempts at
+`USB_CONTROL_MSG_TIMEOUT` (400 ms) with no backoff, so a failing register access
+blocks ~1.2 s — real, but nowhere near the >120 s the kernel lock report
+implies. The hang is elsewhere in the vendor path, and shipping a speculative
+backoff would slow every scan on the working machines without addressing the
+cause. Left alone until it can be reproduced against a wedged device.
+
+**Packaging consequence:** the troubleshooting entry and the installer warning
+were added so the next fresh install says this out loud at install time. The
+`.install` file lives in the AUR repo rather than the git tag, so the improved
+message takes effect immediately; the README/DEV_NOTES changes ship with the
+next version bump.

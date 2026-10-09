@@ -262,6 +262,42 @@ interface shows, the firmware or config is missing — check that
 sudo modprobe -r zt9101_ztopmac_usb && sudo modprobe zt9101_ztopmac_usb
 ```
 
+**`task networkmanager: … is blocked on a mutex likely owned by task iwd: …`**
+
+Two network daemons are driving the same device. On a fresh Artix install `iwd`
+is frequently enabled by default; add NetworkManager on top and both try to own
+the adapter. Every register access in this driver goes over a vendor USB
+control message, and under that contention the path wedges — so the symptom is a
+kernel lock report, not a wifi error.
+
+Only one daemon may manage Wi-Fi:
+
+```sh
+systemctl is-active NetworkManager iwd wpa_supplicant   # see who is running
+sudo systemctl disable --now iwd                        # keep NetworkManager
+```
+
+Artix, with its init flavour of choice instead:
+
+```sh
+sudo rc-update del iwd default     # OpenRC and runit
+sudo s6-rc -d change iwd           # s6
+sudo dinitctl stop iwd             # dinit
+```
+
+If you deliberately want iwd *through* NetworkManager, say so — otherwise NM
+spawns `wpa_supplicant` while iwd independently grabs the same device, which is
+exactly the collision above:
+
+```ini
+# /etc/NetworkManager/NetworkManager.conf
+[device]
+wifi.backend=iwd
+```
+
+Then unplug the adapter and plug it back in, or reboot. Once the vendor register
+path has wedged, the firmware does not recover on its own.
+
 **NetworkManager sees an *ethernet* device instead of Wi-Fi.**
 You are running a WEXT build. This repository builds nl80211 only. Remove any
 stray `zt9101` build from `/lib/modules/$(uname -r)/` and reinstall.
