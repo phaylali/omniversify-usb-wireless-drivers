@@ -18,3 +18,7 @@ modules.order
 # editor noise
 *.swp
 *~
+
+# the AUR clone - it is a separate repository and has now been swept into
+# this one twice by a careless `git add -A`. Never commit it.
+/packaging/omniversify-usb-wireless-drivers-lv-uw03/
