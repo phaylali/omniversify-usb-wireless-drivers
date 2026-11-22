@@ -3126,7 +3126,11 @@ static zt_s32 _cfg80211_Mgmt_Tx(struct wiphy *wiphy,
 #else
                                 struct cfg80211_mgmt_tx_params *params,
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+                                zt_u64 cookie)
+#else
                                 zt_u64 *cookie)
+#endif
 {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)) || defined(COMPAT_KERNEL_RELEASE)
     struct ieee80211_channel *chan = params->chan;
@@ -3175,6 +3179,10 @@ static zt_s32 _cfg80211_Mgmt_Tx(struct wiphy *wiphy,
     }
     tx_ch = (zt_u8)ieee80211_frequency_to_channel(chan->center_freq);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+    /* cookie is provided by cfg80211 */
+    cfg80211_mgmt_tx_status(wdev, cookie, buf, len, ack, GFP_KERNEL);
+#else
     /* cookie generation */
     *cookie = (zt_ptr) buf;
 
@@ -3187,6 +3195,7 @@ static zt_s32 _cfg80211_Mgmt_Tx(struct wiphy *wiphy,
 #endif
 #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 34) && LINUX_VERSION_CODE <= KERNEL_VERSION(2, 6, 36))
     cfg80211_action_tx_status(ndev, *cookie, buf, len, ack, GFP_KERNEL);
+#endif
 #endif
 
     frame_styp = zt_le16_to_cpu(((struct wl_ieee80211_hdr_3addr *)buf)->frame_ctl) &
@@ -4099,9 +4108,12 @@ static zt_s32 cfg80211_remain_on_channel_cb(struct wiphy *wiphy,
         enum nl80211_channel_type
         channel_type,
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+        zt_u32 duration, zt_u64 cookie, const u8 *rx_addr
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0))
+        zt_u32 duration, zt_u64 *cookie, const u8 *rx_addr
+#else
         zt_u32 duration, zt_u64 *cookie
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0))
-        , const u8 *rx_addr
 #endif
         )
 {
@@ -4162,14 +4174,23 @@ static zt_s32 cfg80211_remain_on_channel_cb(struct wiphy *wiphy,
         zt_p2p_cannel_remain_on_channel(pnic_info, 1);
     }
     is_p2p_find = (duration < (p2p_info->ext_listen_interval)) ? zt_true : zt_false;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+    CFG80211_INFO("[%d] mac addr: "ZT_MAC_FMT", cookie:%llx, remain_ch:%d, duration=%d, nego:0x%x",
+                  pnic_info->ndev_id, ZT_MAC_ARG(nic_to_local_addr(pnic_info)), cookie, remain_ch, duration, p2p_info->go_negoing);
+#else
     *cookie = atomic_inc_return(&pcfg80211_wdinfo->ro_ch_cookie_gen);
     CFG80211_INFO("[%d] mac addr: "ZT_MAC_FMT", cookie:%llx, remain_ch:%d, duration=%d, nego:0x%x",
                   pnic_info->ndev_id, ZT_MAC_ARG(nic_to_local_addr(pnic_info)), *cookie, remain_ch, duration, p2p_info->go_negoing);
+#endif
     zt_memcpy(&pcfg80211_wdinfo->remain_on_ch_channel, channel, sizeof(struct ieee80211_channel));
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 8, 0))
     pcfg80211_wdinfo->remain_on_ch_type = channel_type;
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0))
+    pcfg80211_wdinfo->remain_on_ch_cookie = cookie;
+#else
     pcfg80211_wdinfo->remain_on_ch_cookie = *cookie;
+#endif
 
 #if 0
     while (0 != duration && duration < 400)
